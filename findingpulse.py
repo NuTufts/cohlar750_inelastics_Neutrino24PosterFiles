@@ -21,6 +21,7 @@ if cennsly_path not in sys.path:
 import cennsly
 cenns.pytools.CENNSPyTools
 from vis_seghits_root import vis_seghits_root
+from sum_veto_panel_edep import sum_veto_panel_edep
 
 PLOT_HITWFM_AND_PULSES = True
 VIS_SEGHITS = True
@@ -48,6 +49,7 @@ t0_ns = -100.0
 t0_us = t0_ns / 1000.0
 window_pretrig_samples = 2
 window_posttrig_samples = 18
+light_yield = 6.0 # pe/MeVee
 
 # Initialize  
 waveform_integrals = []
@@ -55,13 +57,15 @@ peak_info = {}
 pulse_counts = []
 energy_integrals = []
 
-energy_hist = rt.TH1D("energy_hist", "Total Energy Deposition in Peak Windows;Energy (MeV);Entries", 600, 0, 3000)
-integral_hist = rt.TH1D("integral_hist", "Integral Values of Waveforms;Integral Waveform Value;Entries", 600, 0, 3000)
-integral_hist_veto = rt.TH1D("integral_hist", "Integral Values of Waveforms;Integral Waveform Value;Entries", 600, 0, 3000)
+energy_hist = rt.TH1D("energy_hist", "Energy deposited in veto; Energy (MeV);Entries",100, 0, 200)
+integral_hist = rt.TH1D("integral_hist", "Visible Energy; MeVee;Entries", 40, 0, 200)
+integral_hist_wveto = rt.TH1D("integral_hist_w_veto", "Visible Energy; MeVee;Entries", 40, 0, 200)
 hnpulses_per_entry = rt.TH1D("hnpulses_per_entry","Pulses found per entry",10,0,10)
 
+veto_threshold = 5.0 #  5 MeV by eye, bad veto
+
 # shorten run to debug
-nentries = 10
+#nentries = 10
 
 # Process waveform data to detect peaks
 for ientry in range(nentries):  # nentries
@@ -90,6 +94,7 @@ for ientry in range(nentries):  # nentries
     summed_integral = np.sum( summed_waveform )
     if summed_integral==0.0:
         print("No pulses in waveform, skip entry")
+        hnpulses_per_entry.Fill(0)
         continue
     else:
         print("Entry[%d] summed_integral=%.2f"%(ientry,summed_integral))
@@ -127,7 +132,7 @@ for ientry in range(nentries):  # nentries
                 # Sum the value of the waveform inside the time window
                 integral_value = np.sum(summed_waveform[start_index:end_index + 1])
                 waveform_integrals.append(integral_value)
-                integral_hist.Fill(integral_value)
+                integral_hist.Fill(integral_value/light_yield)
 
                 # Zero out the part of the waveform used for integration
                 summed_waveform[start_index:end_index + 1] = 0
@@ -141,7 +146,8 @@ for ientry in range(nentries):  # nentries
                     "Peak index": sample_idx,
                     "Integral value": integral_value,
                     "Start time (us)": start_time_us,
-                    "End time (us)": end_time_us
+                    "End time (us)": end_time_us,
+                    "Index range":(start_index,end_index),
                 })
 
     # Track the number of pulses in this entry
@@ -170,28 +176,44 @@ for ientry in range(nentries):  # nentries
             # reset the energy integral for the peak, not the entire event
             peak_edep = 0.0
             peintegral = peak["Integral value"]
-
+            peak_time = t0_us + peak["Peak index"]*time_per_sample_us
+            peak_win_start = peak["Start time (us)"]
+            peak_win_end   = peak["End time (us)"]
+            peak_seghits_v = cenns.io.TG4HitSegmentContainer()
+            print("PEAK[",ipeak,"] index_range=",peak["Index range"])
             for ihit in range(nseghits):
                 hit = seghits.at(ihit)
-                            
+
+                if ipeak==0:
+                    print("seghit[",ihit,"] pos=(%.2f,%.2f,%.2f)"%( hit.GetStart()[0], hit.GetStart()[1], hit.GetStart()[2])," t=",hit.GetStart()[3]/1000.0," us edep=",hit.GetEnergyDeposit())
                 # Use the time component of the start and stop positions
                 hit_start_time_us = hit.GetStart()[3] / 1e3  # Convert time to microseconds
                 hit_stop_time_us = hit.GetStop()[3] / 1e3
 
-                if (peak["Start time (us)"] <= hit_start_time_us <= peak["End time (us)"]) or (peak["Start time (us)"] <= hit_stop_time_us <= peak["End time (us)"]):
+                if peak_win_start<=hit_start_time_us  and   hit_start_time_us <= peak_win_end:
                     #print("Peak contains seghit[",ihit,"] pos=(%.2f,%.2f,%.2f)"%( hit.GetStart()[0], hit.GetStart()[1], hit.GetStart()[2]))
                     event_edep += hit.GetEnergyDeposit() # units MeV?
                     peak_edep += hit.GetEnergyDeposit() # units MeV?
-            print("PEAK[",ipeak,"] Edep=",peak_edep," MeV twindow=[",hit_start_time_us,",",hit_stop_time_us,"] PMTintegral(",peintegral,")/6.0peMeVee=",peintegral/6.0," MeV")
-
+                    peak_seghits_v.push_back( hit ) # copy into container
+                    
+            print("PEAK[",ipeak,"] Edep=",peak_edep," MeV twindow=[",hit_start_time_us,",",hit_stop_time_us,"] PMTintegral(",peintegral,")/6.0peMeVee=",peintegral/light_yield," MeV nwin_hits=",peak_seghits_v.size())
+            side_hits = [0,0,0,0]
+            if peak_seghits_v.size()>0:
+                side_hits = sum_veto_panel_edep( peak_seghits_v )
+            print(" panel edeps: ",side_hits)
+                
+            peak["seghits"] = peak_seghits_v
+            energy_hist.Fill(peak_edep)
+            if peak_edep>veto_threshold:
+                integral_hist_wveto.Fill( peintegral/light_yield )
         # Store the total energy deposition for this entry if there was any peak detected
         
-        if event_edep > 0:
-            energy_integrals.append(event_edep)
-            energy_hist.Fill(event_edep)
+        #if event_edep > 0:
+        #    #energy_integrals.append(event_edep)
+        #    #energy_hist.Fill(event_edep)
 
     if PLOT_HITWFM_AND_PULSES or VIS_SEGHITS:
-
+        
         if PLOT_HITWFM_AND_PULSES:
             # visualize pulses
             print("Visualize waveform and pulses: integral=%.2f npulses=%d"%(hwfm.Integral(),num_pulses_in_entry))
@@ -215,11 +237,20 @@ for ientry in range(nentries):  # nentries
 
         temp = None
         if VIS_SEGHITS:
-            temp = vis_seghits_root( seghits, entry="ENTRY %d"%(ientry))
+            seghits_v = []
+            if f"Entry {ientry}" in peak_info:
+                for pulse in peak_info[f"Entry {ientry}"]:
+                    start_us = pulse['Start time (us)']
+                    end_us = pulse['End time (us)']
+                    seghits_v.append( pulse["seghits"] )
+            
+            temp = vis_seghits_root( seghits_v,
+                                     entry="ENTRY %d"%(ientry))
 
         print("[ENTER] to continue")
         input()
-    
+    #end of visualizing event
+#end of event loop
         
 
 
@@ -296,8 +327,10 @@ integral_hist.Draw()
 c2.Draw()
 
 # Save into output file
-output_file = rt.TFile("TestMarley.root", "RECREATE")
+output_file = rt.TFile("output.root", "RECREATE")
 energy_hist.Write()
 integral_hist.Write()
+integral_hist_wveto.Write()
+hnpulses_per_entry.Write()
 output_file.Close()
 
